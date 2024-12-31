@@ -10,14 +10,10 @@ There is no need to install the toolbox and you are only required to locate the 
 
 **`git clone https://github.com/Navidhashemicodes/Local_LipSDP_Python.git`**
 
-Once you located the toolbox in your machine and run an experiment yalmip will be added to your path automatically. However please run "yalmiptest" on your command window to make it certain yalmip works. You can also use cvx as an alternative.
 
 We utilized mosek solver in our experiments, in case you have no access to the license you can easily replace it with another solver when you run the code.
    
 ## Requirements
-Torch
-
-CVXPY
 
 MOSEK (optional)
 
@@ -47,3 +43,4 @@ organization={PMLR}
 
 
 
+"# Local_LipSDP_Python" 
