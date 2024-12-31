@@ -3,51 +3,6 @@ import numpy as np
 import cvxpy as cp
 from prebound_functions import get_weights, slope_bounds
 from scipy.sparse import block_diag, eye, hstack, vstack
-# from scipy.linalg import block_diag
-
-
-
-
-
-# def lipSDP(net,alpha = 0, beta =1):
-    
-#     num_layers = int((len(net)-1)/2)
-    
-#     weights = np.zeros((num_layers+1,), dtype=object)
-#     weights[:] = [net[2*i].weight.detach().numpy().astype(np.float64) for i in range(0,num_layers+1)]
-    
-#     dim_in = weights[0].shape[1]
-
-#     dim_last_hidden = weights[-1].shape[1]
-#     hidden_dims = [weights[i].shape[0] for i in range(0,num_layers)]
-
-#     num_neurons = sum(hidden_dims)
-
-#     # decision vars
-#     Lambda = cp.Variable((num_neurons,1),nonneg=True)
-#     T = cp.diag(Lambda)
-#     rho = cp.Variable((1,1),nonneg=True)
-
-    
-#     C = np.bmat([np.zeros((weights[-1].shape[0],dim_in+num_neurons-dim_last_hidden)),weights[-1]])
-#     D = np.bmat([np.eye(dim_in),np.zeros((dim_in,num_neurons))])
-    
-#     A = weights[0]
-#     for i in range(1,num_layers):
-#         A = block_diag(A,weights[i])
-
-#     A = np.bmat([A,np.zeros((A.shape[0],weights[num_layers].shape[1]))])
-#     B = np.eye(num_neurons)
-#     B = np.bmat([np.zeros((num_neurons,weights[0].shape[1])),B])
-#     A_on_B = np.bmat([[A],[B]])
-
-#     cons = [A_on_B.T@cp.bmat([[-2*alpha*beta*T,(alpha+beta)*T],[(alpha+beta)*T,-2*T]])@A_on_B+C.T@C-rho*D.T@D<<0]
-
-#     prob = cp.Problem(cp.Minimize(rho), cons)
-
-#     prob.solve(solver=cp.MOSEK)
-    
-#     return np.sqrt(rho.value)[0][0]
 
 
 def lipsdp_local_lip(net, alpha_param, beta_param, options, mode):
