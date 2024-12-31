@@ -1,42 +1,22 @@
+import torch
 import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from functions import slope_bounds, lipsdp_local_lip
-import torch.nn as nn
 
-def generate_network(dims, activation):
-    """
-    Generate a PyTorch neural network (nn.Sequential) based on the specified dimensions and activation function.
-    
-    Parameters:
-    - dims: List of integers representing the sizes of input, hidden, and output layers.
-    - activation: String specifying the activation function ('Tanh', 'ReLU', etc.).
-    
-    Returns:
-    - net: PyTorch nn.Sequential model.
-    """
-    layers = []
-    num_layers = len(dims) - 1  # Number of layers in the network
-    
-    # Define activation function
-    if activation == 'Tanh':
-        activation_fn = nn.Tanh()
-    elif activation == 'ReLU':
-        activation_fn = nn.ReLU()
-    else:
-        raise ValueError(f"Unsupported activation function: {activation}")
-    
-    # Build the network
-    for i in range(num_layers):
-        layers.append(nn.Linear(dims[i], dims[i + 1]))  # Linear layer
-        if i < num_layers - 1:  # Add activation after all but the last layer
-            layers.append(activation_fn)
-    
-    # Create nn.Sequential model
-    net = nn.Sequential(*layers)
-    return net
+current_dir = os.getcwd()
+formula_factory_dir = os.path.join(current_dir, "..", "..", "Formula_factory")
+sys.path.append(formula_factory_dir)
+from prebound_functions import slope_bounds, generate_network
+from Lip_functions import lipsdp_local_lip
+from concurrent.futures import ThreadPoolExecutor
 
+def process_epsilon(jj, epsilon_value, X, net, options, mode, bound, time, status, ii):
+    epsilon = epsilon_value * np.ones_like(X)
+    alpha_param, beta_param = slope_bounds(net, X, epsilon)
+    bound[ii, jj], time[ii, jj], status[ii][jj] = lipsdp_local_lip(net, alpha_param, beta_param, options, mode)
+    
+    
 def plot_areaerrorbar(data, x_axis, ax=None, options=None):
     """
     Plots data with mean and shaded area representing error bars.
@@ -80,19 +60,6 @@ def plot_areaerrorbar(data, x_axis, ax=None, options=None):
 
 
 
-
-
-
-
-
-# Dynamically add Formula_factory to the Python path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
-formula_factory_path = os.path.join(project_root, 'Formula_factory')
-
-if formula_factory_path not in sys.path:
-    sys.path.append(formula_factory_path)
-
 # Prepare tiled layout (2x4 subplots)
 fig, axes = plt.subplots(2, 4, figsize=(15, 8), tight_layout=True)
 axes = axes.ravel()
@@ -107,16 +74,20 @@ case_results = [None] * len(cases)
 case_info = [None] * len(cases)
 
 # Common parameters
-options = {'solver': 'mosek', 'verbose': 1}
+options = {'solver': 'MOSEK', 'verbose': 1}
 mode = 'upper'
 NNN = 50
-epsilons = np.concatenate([np.linspace(0.01, 0.51, 26), [0.7, 0.9, 1]])
+epsilons = torch.concatenate([torch.linspace(0.01, 0.51, 26), torch.tensor([0.7, 0.9, 1])])
+
+num_workers = 18
+
 
 # Iterate over each case
 for m, dims in enumerate(cases):
     dimin = dims[0]
     dimout = dims[-1]
-    X = np.zeros((dimin, 1))
+    num_neurons = np.sum(dims[1:-1])
+    X = torch.zeros((dimin, 1))
 
     if m > 3:
         NNN = 20
@@ -131,16 +102,16 @@ for m, dims in enumerate(cases):
         # Assuming a utility function `generate_network` is available
         net = generate_network(dims, activation='Tanh')
 
-        # Parallel loop over epsilons
-        for jj, epsilon_value in enumerate(epsilons):
-            epsilon = epsilon_value * np.ones_like(X)
-            alpha_param, beta_param = slope_bounds(net, X, epsilon)
-            bound[ii, jj], time[ii, jj], status[ii][jj] = lipsdp_local_lip(net, alpha_param, beta_param, options, mode)
+        # Parallelize the loop using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Use map to execute the function concurrently over epsilons
+            executor.map(lambda jj: process_epsilon(jj, epsilons[jj], X, net, options, mode, bound, time, status, ii), range(len(epsilons)))
 
         # Compute global bound
-        epsilon = 100 * np.ones_like(X)
-        alpha_param, beta_param = slope_bounds(net, X, epsilon)
-        bound_global[ii] = lipsdp_local_lip(net, alpha_param, beta_param, options, mode)
+        
+        alpha_param = np.zeros((num_neurons,1))
+        beta_param = np.ones((num_neurons,1))
+        bound_global[ii],_,_ = lipsdp_local_lip(net, alpha_param, beta_param, options, mode)
 
     # Normalize bounds
     case_results[m] = bound / bound_global[:, None]
@@ -160,10 +131,14 @@ for m, dims in enumerate(cases):
     ax.set_ylabel('$L_{loc}/L_{global}$', fontsize=14)
     ax.text(0.5, 0.55, '$\epsilon$', fontsize=20)
     ax.text(-0.2, 1.05, f'({chr(97 + m)})', fontsize=20)
-    ax.boxplot()
+    ax.boxplot(bound[ii, :])
 
 # Save results and plot
 plt.savefig('Casestudy1.eps', format='eps', dpi=300)
+plt.savefig('Casestudy1.png', format='png', dpi=300)
 plt.close(fig)
 
+cases = np.array(cases, dtype=object)
+case_results = np.array(case_results, dtype=object)
+case_info = np.array(case_info, dtype=object)
 np.savez("Experiment_1.npz", cases=cases, case_results=case_results, case_info=case_info)

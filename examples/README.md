@@ -10,7 +10,7 @@ This experiment uses the MNIST dataset, where we train a model to classify the i
 In this experiment, we compare the conservatism of the robustness certificates obtained through our method with other approaches such as LipOPT, LipMIP, CLEVER, FastLip, and LipLP. We use a small radius ε for the L-infinity ball centered at the origin and evaluate the Lipschitz constants computed by each method as ε increases. This experiment shows that Local-LipSDP exhibits significantly lower conservatism compared to FastLip, LipOPT, and LipLP. Although LipMIP also offers lower conservatism, it is not scalable. The folder **`comparing`** contains the files for this experiment.
 
 
-The m-file **`random_test.m`** is provided as toy example to check the performance of the toolbox.
+The py-file **`random_test.py`** is provided as toy example to check the performance of the toolbox.
  
 
 

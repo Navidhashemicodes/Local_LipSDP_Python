@@ -1,8 +1,16 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from functions import slope_bounds
-from functions_1 import lipsdp_local_lip
+import sys
+import os
+
+current_dir = os.getcwd()
+formula_factory_dir = os.path.join(current_dir, "..", "Formula_factory")
+sys.path.append(formula_factory_dir)
+from prebound_functions import slope_bounds
+from Lip_functions import lipsdp_local_lip
+
+
 
 # Set random seed for reproducibility
 torch.manual_seed(0)
@@ -17,6 +25,8 @@ if activation_of_net == 'Tanh':
     activation = nn.Tanh
 elif activation_of_net == 'ReLU':
     activation = nn.ReLU
+elif activation_of_net == 'Sigmoid':
+    activation = nn.Sigmoid
 else:
     raise ValueError(f"Unsupported activation function: {activation_of_net}")
 
@@ -29,6 +39,7 @@ net = nn.Sequential(
     nn.Linear(dims[2], dims[3])
 )
 
+
 # Calculate the total number of neurons across hidden layers
 num_neurons = sum(dims[1:-1])
 
@@ -39,10 +50,11 @@ epsilon = 100 * torch.ones(dims[0], 1)
 # Compute slope bounds
 alpha_param, beta_param = slope_bounds(net, center, epsilon)
 
+
 # Options for Lipschitz computation
 options = {
     'verbose': 1,
-    'solver': 'mosek'
+    'solver': 'MOSEK'
 }
 mode = 'upper'
 

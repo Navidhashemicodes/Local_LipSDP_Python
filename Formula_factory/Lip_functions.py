@@ -1,286 +1,214 @@
 import torch
-import torch.nn as nn
 import numpy as np
-from scipy.optimize import fsolve
+import cvxpy as cp
+from prebound_functions import get_weights, slope_bounds
+from scipy.sparse import block_diag, eye, hstack, vstack
+# from scipy.linalg import block_diag
 
 
-def slope_bound(net, X, epsilon):
+
+
+
+# def lipSDP(net,alpha = 0, beta =1):
+    
+#     num_layers = int((len(net)-1)/2)
+    
+#     weights = np.zeros((num_layers+1,), dtype=object)
+#     weights[:] = [net[2*i].weight.detach().numpy().astype(np.float64) for i in range(0,num_layers+1)]
+    
+#     dim_in = weights[0].shape[1]
+
+#     dim_last_hidden = weights[-1].shape[1]
+#     hidden_dims = [weights[i].shape[0] for i in range(0,num_layers)]
+
+#     num_neurons = sum(hidden_dims)
+
+#     # decision vars
+#     Lambda = cp.Variable((num_neurons,1),nonneg=True)
+#     T = cp.diag(Lambda)
+#     rho = cp.Variable((1,1),nonneg=True)
+
+    
+#     C = np.bmat([np.zeros((weights[-1].shape[0],dim_in+num_neurons-dim_last_hidden)),weights[-1]])
+#     D = np.bmat([np.eye(dim_in),np.zeros((dim_in,num_neurons))])
+    
+#     A = weights[0]
+#     for i in range(1,num_layers):
+#         A = block_diag(A,weights[i])
+
+#     A = np.bmat([A,np.zeros((A.shape[0],weights[num_layers].shape[1]))])
+#     B = np.eye(num_neurons)
+#     B = np.bmat([np.zeros((num_neurons,weights[0].shape[1])),B])
+#     A_on_B = np.bmat([[A],[B]])
+
+#     cons = [A_on_B.T@cp.bmat([[-2*alpha*beta*T,(alpha+beta)*T],[(alpha+beta)*T,-2*T]])@A_on_B+C.T@C-rho*D.T@D<<0]
+
+#     prob = cp.Problem(cp.Minimize(rho), cons)
+
+#     prob.solve(solver=cp.MOSEK)
+    
+#     return np.sqrt(rho.value)[0][0]
+
+
+def lipsdp_local_lip(net, alpha_param, beta_param, options, mode):
     """
-    Computes the slope bounds of a neural network over an L-infinity ball.
-
+    Python implementation of the MATLAB lipsdp_local_lip function.
+    
     Parameters:
-        net (nn.Sequential): The neural network model.
-        X (torch.Tensor): The center of the L-infinity ball.
-        epsilon (float): The radius of the L-infinity ball.
+        net: PyTorch model (nn.Sequential).
+        alpha_param: Parameter alpha (numpy array).
+        beta_param: Parameter beta (numpy array).
+        options: Dictionary with solver and verbose keys.
+        mode: Mode of optimization ('lower' or 'upper').
 
     Returns:
-        tuple: alpha_param, beta_param representing slope parameters.
+        bound: The calculated bound.
+        time: Solver execution time.
+        status: Solver status.
     """
-    # Identify the activation function from the network
-    activation = None
-    for layer in net:
-        if isinstance(layer, nn.ReLU):
-            activation = "ReLU"
-            break
-        elif isinstance(layer, (nn.Tanh, nn.Sigmoid, nn.LeakyReLU)):  # Extend as needed
-            activation = "Non-ReLU"
-            break
+    # Extract weights and biases from net
+    weights_of_net, biases_of_net = get_weights(net)
+    activation_of_net = net[1].__class__.__name__
+
+    # Combine biases except the last one
+    bb = np.vstack([b for b in biases_of_net[:-1]])
+
+    # Input dimension
+    dim_in = weights_of_net[0].shape[1]
+
+    # Dimension of the last hidden layer
+    dim_last_hidden = weights_of_net[-1].shape[1]
+
+    # Total number of neurons
+    num_neurons = bb.shape[0]
+
+    # Set up the optimization problem
+    if options['verbose']:
+        print("Starting optimization...")
+
+    # Define variables
+    lambda_var = cp.Variable((num_neurons,1))
+    rho_sq = cp.Variable((1,1),nonneg=True)
+
+    # Matrix definitions
+    alpha_param = alpha_param.flatten()
+    beta_param = beta_param.flatten()
+    alpha_beta_diag = np.diag(alpha_param * beta_param)
+    alpha_plus_beta_diag = np.diag(alpha_param + beta_param)
+    Q = cp.bmat([
+        [-2 * alpha_beta_diag @ cp.diag(lambda_var), alpha_plus_beta_diag @ cp.diag(lambda_var)],
+        [alpha_plus_beta_diag @ cp.diag(lambda_var), -2 * cp.diag(lambda_var)]
+    ])
+
+    A = block_diag([weights for weights in weights_of_net[:-1]])
+    A = hstack([A, np.zeros((A.shape[0], dim_last_hidden))])
+    B = hstack([np.zeros((num_neurons, dim_in)), eye(num_neurons)])
     
-    # Handle cases based on the activation type
-    if activation == "ReLU":
-        l, u = piecewise_linear_bounds_ReLU(net, X, epsilon)
-        alpha_param, beta_param = piecewise_linear_slopes_ReLU(l, u)
-    elif activation == "Non-ReLU":
-        l, u = piecewise_linear_bounds_noReLU(net, X, epsilon)
-        alpha_param, beta_param = piecewise_linear_slopes_noReLU(l, u)
+    AB = vstack([A, B])
+    
+    Mmid = AB.T @ Q @ AB
+    
+    El = np.hstack([np.zeros((dim_last_hidden, dim_in + num_neurons - dim_last_hidden)), np.eye(dim_last_hidden)])
+    E0 = np.hstack([np.eye(dim_in), np.zeros((dim_in, num_neurons))])
+    Mout = rho_sq * (E0.T @ E0) - ((weights_of_net[-1] @ El).T @ (weights_of_net[-1] @ El))
+
+    # Optimization problem
+    constraints = []
+
+    if mode == 'lower':
+        objective = cp.Maximize(rho_sq)
+        constraints.append(Mmid + Mout << 0)
+    elif mode == 'upper':
+        objective = cp.Minimize(rho_sq)
+        constraints.append(Mmid - Mout << 0)
     else:
-        raise ValueError("Unsupported or missing activation function in the network.")
+        raise ValueError("Mode must be 'lower' or 'upper'.")
+
+    # Add activation-specific constraints
+    if activation_of_net == 'ReLU':
+        ipn_indices = np.intersect1d(np.where(alpha_param == 0)[0], np.where(beta_param == 1)[0])
+        for i in ipn_indices:
+            constraints.append(lambda_var[i] >= 0)
+    else:
+        constraints.append(lambda_var >= 0)
+
+    # Solve the problem
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=options['solver'], verbose=options['verbose'])
+
+    # Collect results
+    bound = np.sqrt(rho_sq.value)[0][0]
+    time = prob.solver_stats.solve_time
+    status = prob.status
+
+    # Display the result
+    message = f"method: local lipsdp | solver: {options['solver']} | bound: {bound} | time: {time} | status: {status}"
+    print(message)
+
+    return bound, time, status
+
+
+def robustness_bisection(net, input_data):
+    """
+    Epsilon finder function in Python.
+
+    Parameters:
+        net: The neural network object, with methods `eval` and `slope_bounds`.
+        input_data: Input data point to evaluate.
+        L_g: Global Lipschitz constant.
+
+    Returns:
+        L: Local Lipschitz constant.
+        epsilon: Maximum perturbation radius.
+        rho: Minimum margin between the correct and incorrect outputs.
+    """
     
-    return alpha_param, beta_param
-
-
-def get_weights(net):
-
-    num_layers = int((len(net)-1)/2)
-
-    # network dimensions
-    #dim_in = int(net[0].weight.shape[1])
-    #dim_out = int(net[-1].weight.shape[0])
-    #hidden_dims = [int(net[2*i].weight.shape[0]) for i in range(0,num_layers)]
-    #dims = [dim_in] + hidden_dims + [dim_out]
-
-    # get weights
-    weights = np.zeros((num_layers+1,), dtype=np.object)
-    weights[:] = [net[2*i].weight.detach().numpy().astype(np.float64) for i in range(0,num_layers+1)]
-
-
-    # get biases
-    biases = np.zeros((num_layers+1,), dtype=np.object)
-    biases[:] = [net[2*i].bias.detach().numpy().astype(np.float64).reshape(-1,1) for i in range(0,num_layers+1)]
-
-    return weights,biases
-
-
-def first_pre_activate(W,b,X,epsilon):
-    l_first=-np.dot(np.abs(W),epsilon)+np.dot(W,X)+b
-    u_first=np.dot(np.abs(W),epsilon)+np.dot(W,X)+b
-        
-    return l_first, u_first
-
-
-###################################  noReLU part   ##########################################
-
+    dims_in = net[0].weight.shape[1]
+    # dim_out = net[-1].weight.shape[0]
+    # hidden_dims = [net[2*i].weight.shape[0] for i in range(0,num_layers)]
     
-def diffi(x,func):
-    epsi=0.00001
-    y_prim= (func(x+epsi)-func(x-epsi))/(2*epsi)
-    return y_prim
+    output_data = net(input_data.T).detach().numpy()
+    output_data = output_data.T
 
-def d_find_upp(d,*data):
-    l,funci=data
-    S=((funci(d)-funci(l))/(d-l))-diffi(d,funci)       
-    return S
+    # Display classification
+    i = np.argmax(output_data)
+    print(f"The introduced data point is classified to be {i}")
 
-def d_find_low(d,*data):
-    u,funci=data
-    S=((funci(d)-funci(u))/(d-u))-diffi(d,funci)
-    return S
+    # Compute rho (minimum margin)
+    leng = len(output_data)
+    I = np.eye(leng)
+    Rho = [
+        abs((I[:, i] - I[:, j]).T @ output_data / np.sqrt(2))
+        for j in range(leng) if j != i
+    ]
+    rho = min(Rho)
     
-        
+    options = {'solver': 'MOSEK', 'verbose': 1}
+    mode = 'upper'
     
-    
-def next_layer_prebound_noReLU(W,b,l_pre,u_pre,func):
-    leng=len(l_pre)
-    alph_upp=np.zeros((leng,1),np.float)
-    alph_low=np.zeros((leng,1),np.float)
-    alphabet_upp=np.zeros((leng,1),np.float)
-    alphabet_low=np.zeros((leng,1),np.float)
-    
-    for i in range(0,leng):
-        if l_pre[i]>0:
-            d=0.5*(l_pre[i]+u_pre[i])
-            alph_upp[i]=diffi(d,func)
-            alphabet_upp[i]=func(d)-alph_upp[i]*d
-            ss=(func(u_pre[i])-func(l_pre[i]))/(u_pre[i]-l_pre[i])
-            alph_low[i]=ss
-            alphabet_low[i]=func(l_pre[i])-alph_low[i]*l_pre[i]
-        elif u_pre[i]<0:
-            ss=(func(u_pre[i])-func(l_pre[i]))/(u_pre[i]-l_pre[i])
-            alph_upp[i]=ss
-            alphabet_upp[i]=func(l_pre[i])-alph_upp[i]*l_pre[i]
-                
-            d=0.5*(l_pre[i]+u_pre[i])
-            alph_low[i]=diffi(d,func)
-            alphabet_low[i]=func(d)-alph_low[i]*d
+    # Bisection initialization
+    epsi_lower = 0.001
+    epsi_upper = 2  # Assume minimum L cannot be smaller than 0.01 * L_global
+    epsilon = epsi_upper
+
+    while epsi_upper - epsi_lower >= 0.0001:
+        epsi = 0.5 * (epsi_lower + epsi_upper)
+        epsi_vector = epsi * torch.ones_like(input_data)  # Sphere approximation with cube
+
+        # Slope bounds computation
+        alpha_param, beta_param = slope_bounds(net, input_data, epsi_vector)
+
+        # Compute Lipschitz bound using Local-LipSDP with cvxpy
+        bound,_,_ = lipsdp_local_lip(net, alpha_param, beta_param, options, mode)
+
+        # Update bisection bounds
+        if bound * epsi * np.sqrt(dims_in) >= rho:
+            epsi_upper = epsi
         else:
-            data=(l_pre[i],func)
-            d=fsolve(d_find_upp,0.01, args=data)
-            if d<0 or d>u_pre[i]:
-                ss=(func(u_pre[i])-func(l_pre[i]))/(u_pre[i]-l_pre[i])
-                alph_upp[i]=ss
-                alphabet_upp[i]=func(l_pre[i])-alph_upp[i]*l_pre[i]
-            else:
-                alph_upp[i]=diffi(d,func)
-                alphabet_upp[i]=func(l_pre[i])-alph_upp[i]*l_pre[i]
-                 
-                    
-            data=(u_pre[i],func)
-            d=fsolve(d_find_low,0.01, args=data)
-            if d>0 or d<l_pre[i]:
-                ss=(func(u_pre[i])-func(l_pre[i]))/(u_pre[i]-l_pre[i])
-                alph_low[i]=ss
-                alphabet_low[i]=func(u_pre[i])-alph_low[i]*u_pre[i]
-            else:
-                alph_low[i]=diffi(d,func)
-                alphabet_low[i]=func(u_pre[i])-alph_low[i]*u_pre[i]
-                
-    W_pos=0.5*(W+np.abs(W))
-    W_neg=0.5*(W-np.abs(W))
-    mid=0.5*(l_pre+u_pre)
-    dif=0.5*(u_pre-l_pre)
-    
-    cc1=W_pos*alph_low.T+W_neg*alph_upp.T
-    dd1=np.dot(W_pos,alphabet_low) + np.dot(W_neg,alphabet_upp) + b
-    l_next=-np.dot(np.abs(cc1),dif) + np.dot(cc1,mid) + dd1
-    
-    
-    
-    cc2=W_neg*alph_low.T+W_pos*alph_upp.T
-    dd2=np.dot(W_neg,alphabet_low) + np.dot(W_pos,alphabet_upp) + b
-    u_next=np.dot(np.abs(cc2),dif)+np.dot(cc2,mid)+dd2
-    
-    return l_next, u_next
-    
-    
-def piecewise_linear_bounds_noReLU(net,X,epsilon):
-    
-    func = lambda x: net[1](torch.tensor(x, dtype=torch.float32)) if isinstance(x, (np.ndarray, np.number)) else net[1](x)
-    
-    num_layers = int((len(net)-1)/2)
-    W,b=get_weights(net)
-    ll,uu=first_pre_activate(W[0],b[0],X,epsilon)
-    leng=len(ll)
-    N=0
-    for i in range(0,num_layers):
-        N+=np.size(W[i],0)
-    
-    l=np.zeros((N,1),np.float)
-    u=np.zeros((N,1),np.float)
-    ii=np.r_[0:leng]
-    l[ii]=ll
-    u[ii]=uu
-    num=leng-1
-    for i in range(1,num_layers):
-        ll,uu=next_layer_prebound_noReLU(W[i],b[i],ll,uu,func)
-        leng=len(ll)
-        ii=np.r_[num+1:num+1+leng]
-        num+=leng
-        l[ii]=ll
-        u[ii]=uu
-    return l,u
-    
+            epsi_lower = epsi
 
-def piecewise_linear_slopes_noReLU(l,u,func):
-    
-    diffil=diffi(l,func)
-    diffiu=diffi(u,func)
-    diffi_1=diffi(np.zeros(l.shape,np.float),func)
-    diffi_2=diffi(0.5*(l+u),func)
-    diffi0= ((l*u)>0)*diffi_2 + ((l*u)<=0)*diffi_1
-    alpha_param=np.minimum(diffil,diffiu)
-    beta_param=np.maximum(diffi0, np.maximum(diffil,diffiu))
-    
-    return alpha_param,beta_param
+        epsilon = epsi
 
-
-
-
-##############################   ReLU part #########################################
-
-
-##################   MIT Paper:
-
-    
-def next_layer_prebound_ReLU(W,b,l_pre,u_pre):
-    leng=len(l_pre)
-    alph_upp=np.zeros((leng,1),np.float)
-    alph_low=np.zeros((leng,1),np.float)
-    alphabet_upp=np.zeros((leng,1),np.float)
-    alphabet_low=np.zeros((leng,1),np.float)
-    
-    for i in range(0,leng):
-        if l_pre[i]>0:
-            alph_upp[i]=1.0
-            alphabet_upp[i]=0.0
-            alph_low[i]=1.0
-            alphabet_low[i]=0.0
-        elif u_pre[i]<0:
-            alph_upp[i]=0.0
-            alphabet_upp[i]=0.0
-                
-            alph_low[i]=0.0
-            alphabet_low[i]=0.0
-        else:
-            alph_upp[i]=u_pre[i]/(u_pre[i]-l_pre[i])
-            alphabet_upp[i]=-l_pre[i]*u_pre[i]/(u_pre[i]-l_pre[i])
-
-            if  u_pre[i]>abs(l_pre[i]):
-                alph_low[i]=1.0
-                alphabet_low[i]=0.0
-            else:
-                alph_low[i]=0.0
-                alphabet_low[i]=0.0
-                
-    W_pos=0.5*(W+np.abs(W))
-    W_neg=0.5*(W-np.abs(W))
-    mid=0.5*(l_pre+u_pre)
-    dif=0.5*(u_pre-l_pre)
-    
-    cc1=W_pos*alph_low.T+W_neg*alph_upp.T
-    dd1=np.dot(W_pos,alphabet_low) + np.dot(W_neg,alphabet_upp) + b
-    l_next=-np.dot(np.abs(cc1),dif) + np.dot(cc1,mid) + dd1
-    
-    
-    
-    cc2=W_neg*alph_low.T+W_pos*alph_upp.T
-    dd2=np.dot(W_neg,alphabet_low) + np.dot(W_pos,alphabet_upp) + b
-    u_next=np.dot(np.abs(cc2),dif)+np.dot(cc2,mid)+dd2
-    
-        
-    return l_next, u_next
-    
-    
-
-    
-    
-def piecewise_linear_bounds_ReLU(net,X,epsilon):
-    num_layers = int((len(net)-1)/2)
-    W,b=get_weights(net)
-    ll,uu=first_pre_activate(W[0],b[0],X,epsilon)
-    leng=len(ll)
-    N=0
-    for i in range(0,num_layers):
-        N+=np.size(W[i],0)
-    
-    l=np.zeros((N,1),np.float)
-    u=np.zeros((N,1),np.float)
-    ii=np.r_[0:leng]
-    l[ii]=ll
-    u[ii]=uu
-    num=leng-1
-    for i in range(1,num_layers):
-        ll,uu=next_layer_prebound_ReLU(W[i],b[i],ll,uu)
-        leng=len(ll)
-        ii=np.r_[num+1:num+1+leng]
-        num+=leng
-        l[ii]=ll
-        u[ii]=uu
-    return l,u
-
-
-def piecewise_linear_slopes_ReLU(l,u):
-    
-    alpha_param= (l>0)*np.ones(l.shape,np.float)
-    beta_param=(u>=0)*np.ones(u.shape,np.float)
-    
-    return alpha_param,beta_param
+    # Final Lipschitz constant and epsilon
+    L = bound
+    return L, epsilon, rho

@@ -15,36 +15,36 @@ functions_path = os.path.join(dir_path, 'Formula_factory')  # Adjust this if nec
 sys.path.append(functions_path)
 
 # Now you can import the functions from functions.py
-from functions import slope_bounds, lipsdp_local_lip
+from prebound_functions import slope_bounds
+from Lip_functions import  lipsdp_local_lip
 
 # Assuming Comparison.mat is loaded as a PyTorch model
 # Load the PyTorch model (replace this with actual path)
-Comparison = torch.load('Comparison.pt')  # Replace with actual file path
+net = torch.load('Comparison.pt')  # Replace with actual file path
+
+
 
 # Set up the options and mode
-options = {'solver': 'mosek', 'verbose': 1}
+options = {'solver': 'MOSEK', 'verbose': 1}
 mode = 'upper'
 
 # Define epsilon values
 epsilons = np.array([0.001, 0.003, 0.007, 0.01, 0.04, 0.1, 0.3, 0.7, 2])
 
-# Get the dimensions of the network
-dims = Comparison['net'].dims  # Assuming 'net' is part of the Comparison dictionary
-dimin = dims[0]
+dimin = net[0].weight.shape[1]
 X = torch.zeros(dimin, 1)
-dimout = dims[-1]
 
 # Initialize arrays for the results
-bound = torch.zeros(1, len(epsilons))
-time = torch.zeros(1, len(epsilons))
+bound = np.zeros((len(epsilons),1))
+time = np.zeros((len(epsilons),1))
 status = [None] * len(epsilons)
 
 # Parallel processing using PyTorch and multiprocessing (can be adjusted based on the system)
 # Iterate over each epsilon value and compute the bounds
 for i in range(len(epsilons)):
     epsilon = epsilons[i] * torch.ones_like(X)
-    alpha_param, beta_param = slope_bounds(Comparison['net'], X, epsilon)
-    bound[i], time[i], status[i] = lipsdp_local_lip(Comparison['net'], alpha_param, beta_param, options, mode)
+    alpha_param, beta_param = slope_bounds(net, X, epsilon)
+    bound[i], time[i], status[i] = lipsdp_local_lip(net, alpha_param, beta_param, options, mode)
 
 # Output the results
 print(f"The Lipstchitz certificates, for each epsilon in {list(epsilons)}, from Local_LipSDP are: {bound.tolist()} respectively.")
